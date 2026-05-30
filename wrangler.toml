@@ -4,5 +4,5 @@ compatibility_date = "2026-05-30"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "line_time_wallet_db"
-database_id = "あなたのD1 database_id"
+database_name = "kamaccho_db"
+database_id = "2606b851-e385-489d-bc36-258b0bc09544"
