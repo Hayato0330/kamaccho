@@ -1,3 +1,8 @@
 name = "kamaccho"
 main = "src/index.js"
 compatibility_date = "2026-05-30"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "line_time_wallet_db"
+database_id = "あなたのD1 database_id"
