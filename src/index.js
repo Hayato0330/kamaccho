@@ -97,6 +97,12 @@ async function handleLineEvent(event, env) {
 async function processCommand(db, lineUserId, text) {
   const normalized = text.replace(/\s+/g, " ").trim();
 
+  if (normalized === "テスト") {
+    return {
+      message: "ありがとうございます！",
+    };
+  }
+
   if (normalized === "残り" || normalized === "残高" || normalized === "確認") {
     const wallet = await getWallet(db);
 
