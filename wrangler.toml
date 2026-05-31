@@ -6,3 +6,11 @@ compatibility_date = "2026-05-30"
 binding = "DB"
 database_name = "kamaccho_db"
 database_id = "2606b851-e385-489d-bc36-258b0bc09544"
+
+[env.test]
+name = "kamaccho-line-test"
+
+[[env.test.d1_databases]]
+binding = "DB"
+database_name = "kamaccho_test_db"
+database_id = "11c22a9a-67f4-499e-8d7c-9fbbecef2cd4"
