@@ -98,8 +98,24 @@ async function processCommand(db, lineUserId, text) {
   const normalized = text.replace(/\s+/g, " ").trim();
 
   if (normalized === "テスト") {
+    const savedUser = await db
+      .prepare(
+        `
+        SELECT
+          line_user_id,
+          updated_at
+        FROM users
+        WHERE line_user_id = ?
+        `
+      )
+      .bind(lineUserId)
+      .first();
+
     return {
-      message: "ありがとうございます！",
+      message:
+        "ありがとうございます！\n" +
+        `userId: ${lineUserId}\n` +
+        `D1保存: ${savedUser ? "OK" : "NG"}`,
     };
   }
 
