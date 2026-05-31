@@ -113,7 +113,9 @@ async function processCommand(db, lineUserId, text) {
 
     return {
       message:
-        "ありがとうございます！\n",
+        "ありがとうございます！\n" +
+        `userId: ${lineUserId}\n` +
+        `D1保存: ${savedUser ? "OK" : "NG"}`,
     };
   }
 
