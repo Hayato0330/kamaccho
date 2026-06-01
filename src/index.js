@@ -3,9 +3,14 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === "GET" && url.pathname === "/") {
+      return renderHomePage(env);
+    }
+
+    if (request.method === "GET" && url.pathname === "/api/status") {
+      const wallet = await getWallet(env.DB);
       return json({
-        ok: true,
-        message: "LINE time wallet bot is running.",
+        totalMinutes: wallet.total_minutes,
+        remainingMinutes: wallet.remaining_minutes,
       });
     }
 
@@ -68,7 +73,7 @@ async function handleLineWebhook(request, env) {
     );
   }
 
-  for (const event of body.events) {
+  for (const event of body.events || []) {
     await handleLineEvent(event, env);
   }
 
@@ -87,103 +92,264 @@ async function handleLineEvent(event, env) {
 
   if (!lineUserId || !replyToken || !text) return;
 
-  await upsertUser(env.DB, lineUserId);
+  const role = getRole(env, lineUserId);
 
-  const result = await processCommand(env.DB, lineUserId, text);
+  if (!role) {
+    await replyMessage(
+      env.LINE_CHANNEL_ACCESS_TOKEN,
+      replyToken,
+      "このアカウントでは利用できません。"
+    );
+    return;
+  }
 
-  await replyMessage(env.LINE_CHANNEL_ACCESS_TOKEN, replyToken, result.message);
+  await upsertUser(env.DB, lineUserId, role);
+
+  const result = await processCommand(env, role, lineUserId, text);
+
+  await replyMessage(
+    env.LINE_CHANNEL_ACCESS_TOKEN,
+    replyToken,
+    result.message,
+    result.quickReply
+  );
 }
 
-async function processCommand(db, lineUserId, text) {
-  const normalized = text.replace(/\s+/g, " ").trim();
+function getRole(env, lineUserId) {
+  if (lineUserId === env.OWNER_LINE_USER_ID) return "owner";
+  if (lineUserId === env.PARTNER_LINE_USER_ID) return "partner";
+  return null;
+}
 
-  if (normalized === "テスト") {
-    const savedUser = await db
-      .prepare(
-        `
-        SELECT
-          line_user_id,
-          updated_at
-        FROM users
-        WHERE line_user_id = ?
-        `
-      )
-      .bind(lineUserId)
-      .first();
+async function processCommand(env, role, lineUserId, text) {
+  const normalized = normalizeText(text);
+
+  if (isStatusCommand(normalized)) {
+    const wallet = await getWallet(env.DB);
+    return {
+      message: formatStatus(wallet),
+      quickReply: getQuickReply(role),
+    };
+  }
+
+  if (role === "partner") {
+    return processPartnerCommand(env, lineUserId, normalized, text);
+  }
+
+  return processOwnerCommand(env, lineUserId, normalized, text);
+}
+
+async function processPartnerCommand(env, lineUserId, normalized, rawText) {
+  const minutes = parseUseMinutes(normalized);
+
+  if (!minutes) {
+    return {
+      message:
+        "使える操作は「残り」と「使用」です。\n" +
+        "例: 使用 30 / 30分",
+      quickReply: getQuickReply("partner"),
+    };
+  }
+
+  if (minutes <= 0) {
+    return {
+      message: "使用する時間は1分以上で入力してください。",
+      quickReply: getQuickReply("partner"),
+    };
+  }
+
+  const result = await updateWallet(env.DB, {
+    actorLineUserId: lineUserId,
+    eventType: "use",
+    minutes,
+    rawMessage: rawText,
+  });
+
+  if (!result.ok) {
+    return {
+      message:
+        "残り時間が足りません。\n" +
+        `現在の残り時間は ${formatMinutes(result.beforeRemaining)} です。`,
+      quickReply: getQuickReply("partner"),
+    };
+  }
+
+  if (env.OWNER_LINE_USER_ID) {
+    await pushMessage(
+      env.LINE_CHANNEL_ACCESS_TOKEN,
+      env.OWNER_LINE_USER_ID,
+      `かまってリクエスト: ${minutes}分\n残り時間: ${formatMinutes(
+        result.afterRemaining
+      )}`
+    );
+  }
+
+  return {
+    message:
+      `${minutes}分を使いました。\n` +
+      `残り時間は ${formatMinutes(result.afterRemaining)} です。`,
+    quickReply: getQuickReply("partner"),
+  };
+}
+
+async function processOwnerCommand(env, lineUserId, normalized, rawText) {
+  const setMatch = normalized.match(/^設定\s+(\d+)$/);
+  const addMatch = normalized.match(/^追加\s+(\d+)$/);
+  const adjustMatch = normalized.match(/^調整\s+(-?\d+)$/);
+
+  if (setMatch) {
+    const minutes = Number(setMatch[1]);
+    const result = await setWallet(env.DB, lineUserId, minutes, rawText);
 
     return {
       message:
-        "ありがとうございます！\n" +
-        `userId: ${lineUserId}\n` +
-        `D1保存: ${savedUser ? "OK" : "NG"}`,
+        `残り時間を ${formatMinutes(result.afterRemaining)} に設定しました。\n` +
+        `総追加時間は ${formatMinutes(result.totalMinutes)} です。`,
+      quickReply: getQuickReply("owner"),
     };
   }
 
-  if (normalized === "残り" || normalized === "残高" || normalized === "確認") {
-    const wallet = await getWallet(db);
+  if (addMatch) {
+    const minutes = Number(addMatch[1]);
+    const result = await updateWallet(env.DB, {
+      actorLineUserId: lineUserId,
+      eventType: "add",
+      minutes,
+      rawMessage: rawText,
+    });
 
     return {
       message:
-        `現在の残り時間は ${wallet.remaining_minutes} 分です。\n` +
-        `総追加時間は ${wallet.total_minutes} 分です。`,
+        `${minutes}分を追加しました。\n` +
+        `残り時間は ${formatMinutes(result.afterRemaining)} です。`,
+      quickReply: getQuickReply("owner"),
     };
   }
 
-  const match = normalized.match(/^(追加|使用|調整)\s+(-?\d+)$/);
+  if (adjustMatch) {
+    const minutes = Number(adjustMatch[1]);
+    const result = await updateWallet(env.DB, {
+      actorLineUserId: lineUserId,
+      eventType: "adjust",
+      minutes,
+      rawMessage: rawText,
+    });
 
-  if (!match) {
+    if (!result.ok) {
+      return {
+        message:
+          "残り時間が0分未満になる調整はできません。\n" +
+          `現在の残り時間は ${formatMinutes(result.beforeRemaining)} です。`,
+        quickReply: getQuickReply("owner"),
+      };
+    }
+
     return {
       message:
-        "使い方：\n" +
-        "追加 60\n" +
-        "使用 30\n" +
-        "調整 -10\n" +
-        "残り",
+        `${minutes}分を調整しました。\n` +
+        `残り時間は ${formatMinutes(result.afterRemaining)} です。`,
+      quickReply: getQuickReply("owner"),
     };
   }
 
-  const command = match[1];
-  const minutes = Number(match[2]);
+  return {
+    message:
+      "使える操作は「残り」「追加」「調整」「設定」です。\n" +
+      "例: 追加 60 / 調整 -10 / 設定 180",
+    quickReply: getQuickReply("owner"),
+  };
+}
 
-  if (!Number.isInteger(minutes)) {
-    return {
-      message: "分数は整数で入力してください。",
-    };
-  }
+function normalizeText(text) {
+  return text.replace(/[　\t\r\n]+/g, " ").replace(/\s+/g, " ").trim();
+}
 
-  if ((command === "追加" || command === "使用") && minutes <= 0) {
-    return {
-      message: "追加・使用は1分以上で入力してください。",
-    };
-  }
+function isStatusCommand(text) {
+  return ["残り", "残高", "確認", "残り時間"].includes(text);
+}
 
+function parseUseMinutes(text) {
+  const directMatch = text.match(/^(\d+)\s*分?$/);
+  if (directMatch) return Number(directMatch[1]);
+
+  const useMatch = text.match(/^使用\s+(\d+)$/);
+  if (useMatch) return Number(useMatch[1]);
+
+  return null;
+}
+
+async function updateWallet(db, params) {
   const walletBefore = await getWallet(db);
   const beforeRemaining = walletBefore.remaining_minutes;
 
   let totalMinutes = walletBefore.total_minutes;
   let afterRemaining = walletBefore.remaining_minutes;
-  let eventType;
 
-  if (command === "追加") {
-    totalMinutes += minutes;
-    afterRemaining += minutes;
-    eventType = "add";
-  } else if (command === "使用") {
-    afterRemaining -= minutes;
-    eventType = "use";
+  if (params.eventType === "add") {
+    totalMinutes += params.minutes;
+    afterRemaining += params.minutes;
+  } else if (params.eventType === "use") {
+    afterRemaining -= params.minutes;
 
     if (afterRemaining < 0) {
       return {
-        message:
-          `残り時間が足りません。\n` +
-          `現在の残り時間は ${beforeRemaining} 分です。`,
+        ok: false,
+        beforeRemaining,
       };
     }
-  } else {
-    afterRemaining += minutes;
-    eventType = "adjust";
+  } else if (params.eventType === "adjust") {
+    afterRemaining += params.minutes;
+
+    if (afterRemaining < 0) {
+      return {
+        ok: false,
+        beforeRemaining,
+      };
+    }
   }
 
+  await saveWallet(db, totalMinutes, afterRemaining);
+  await insertEvent(db, {
+    lineUserId: params.actorLineUserId,
+    eventType: params.eventType,
+    minutes: params.minutes,
+    beforeRemaining,
+    afterRemaining,
+    note: params.eventType,
+    rawMessage: params.rawMessage,
+  });
+
+  return {
+    ok: true,
+    totalMinutes,
+    beforeRemaining,
+    afterRemaining,
+  };
+}
+
+async function setWallet(db, lineUserId, minutes, rawMessage) {
+  const walletBefore = await getWallet(db);
+  const beforeRemaining = walletBefore.remaining_minutes;
+
+  await saveWallet(db, minutes, minutes);
+  await insertEvent(db, {
+    lineUserId,
+    eventType: "set",
+    minutes,
+    beforeRemaining,
+    afterRemaining: minutes,
+    note: "set",
+    rawMessage,
+  });
+
+  return {
+    totalMinutes: minutes,
+    beforeRemaining,
+    afterRemaining: minutes,
+  };
+}
+
+async function saveWallet(db, totalMinutes, remainingMinutes) {
   await db
     .prepare(
       `
@@ -195,9 +361,11 @@ async function processCommand(db, lineUserId, text) {
       WHERE id = 1
       `
     )
-    .bind(totalMinutes, afterRemaining)
+    .bind(totalMinutes, remainingMinutes)
     .run();
+}
 
+async function insertEvent(db, event) {
   await db
     .prepare(
       `
@@ -213,52 +381,31 @@ async function processCommand(db, lineUserId, text) {
       `
     )
     .bind(
-      lineUserId,
-      eventType,
-      minutes,
-      beforeRemaining,
-      afterRemaining,
-      command,
-      text
+      event.lineUserId,
+      event.eventType,
+      event.minutes,
+      event.beforeRemaining,
+      event.afterRemaining,
+      event.note,
+      event.rawMessage
     )
     .run();
-
-  if (command === "追加") {
-    return {
-      message:
-        `${minutes}分を追加しました。\n` +
-        `残り時間：${afterRemaining}分`,
-    };
-  }
-
-  if (command === "使用") {
-    return {
-      message:
-        `${minutes}分を使用しました。\n` +
-        `残り時間：${afterRemaining}分`,
-    };
-  }
-
-  return {
-    message:
-      `${minutes}分を調整しました。\n` +
-      `残り時間：${afterRemaining}分`,
-  };
 }
 
-async function upsertUser(db, lineUserId) {
+async function upsertUser(db, lineUserId, role) {
   await db
     .prepare(
       `
       INSERT INTO users (
         line_user_id,
         role
-      ) VALUES (?, 'member')
+      ) VALUES (?, ?)
       ON CONFLICT(line_user_id) DO UPDATE SET
+        role = excluded.role,
         updated_at = CURRENT_TIMESTAMP
       `
     )
-    .bind(lineUserId)
+    .bind(lineUserId, role)
     .run();
 }
 
@@ -297,7 +444,66 @@ async function getWallet(db) {
   return wallet;
 }
 
-async function replyMessage(channelAccessToken, replyToken, text) {
+function getQuickReply(role) {
+  if (role === "partner") {
+    return {
+      items: [
+        quickReplyText("残りを見る", "残り"),
+        quickReplyText("15分使う", "使用 15"),
+        quickReplyText("30分使う", "使用 30"),
+        quickReplyText("60分使う", "使用 60"),
+      ],
+    };
+  }
+
+  return {
+    items: [
+      quickReplyText("残りを見る", "残り"),
+      quickReplyText("30分追加", "追加 30"),
+      quickReplyText("60分追加", "追加 60"),
+      quickReplyText("30分減らす", "調整 -30"),
+    ],
+  };
+}
+
+function quickReplyText(label, text) {
+  return {
+    type: "action",
+    action: {
+      type: "message",
+      label,
+      text,
+    },
+  };
+}
+
+function formatStatus(wallet) {
+  return (
+    `残り時間は ${formatMinutes(wallet.remaining_minutes)} です。\n` +
+    `総追加時間は ${formatMinutes(wallet.total_minutes)} です。`
+  );
+}
+
+function formatMinutes(minutes) {
+  const safeMinutes = Math.max(0, Number(minutes) || 0);
+  const hours = Math.floor(safeMinutes / 60);
+  const rest = safeMinutes % 60;
+
+  if (hours === 0) return `${rest}分`;
+  if (rest === 0) return `${hours}時間`;
+  return `${hours}時間${rest}分`;
+}
+
+async function replyMessage(channelAccessToken, replyToken, text, quickReply) {
+  const message = {
+    type: "text",
+    text,
+  };
+
+  if (quickReply) {
+    message.quickReply = quickReply;
+  }
+
   const response = await fetch("https://api.line.me/v2/bot/message/reply", {
     method: "POST",
     headers: {
@@ -306,6 +512,25 @@ async function replyMessage(channelAccessToken, replyToken, text) {
     },
     body: JSON.stringify({
       replyToken,
+      messages: [message],
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    console.error("LINE reply error:", response.status, errorText);
+  }
+}
+
+async function pushMessage(channelAccessToken, to, text) {
+  const response = await fetch("https://api.line.me/v2/bot/message/push", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${channelAccessToken}`,
+    },
+    body: JSON.stringify({
+      to,
       messages: [
         {
           type: "text",
@@ -317,7 +542,7 @@ async function replyMessage(channelAccessToken, replyToken, text) {
 
   if (!response.ok) {
     const errorText = await response.text();
-    console.error("LINE reply error:", response.status, errorText);
+    console.error("LINE push error:", response.status, errorText);
   }
 }
 
@@ -367,6 +592,184 @@ function timingSafeEqual(a, b) {
   }
 
   return result === 0;
+}
+
+async function renderHomePage(env) {
+  const wallet = await getWallet(env.DB);
+  const remaining = wallet.remaining_minutes;
+  const total = wallet.total_minutes;
+  const percent = total > 0 ? Math.min(100, Math.round((remaining / total) * 100)) : 0;
+
+  return new Response(
+    `<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>かまっちょ時間</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #24312f;
+      --muted: #66736f;
+      --paper: #fffaf7;
+      --line: #ead9d1;
+      --mint: #8fd3bd;
+      --rose: #ff8fa3;
+      --lemon: #ffd166;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background:
+        linear-gradient(135deg, rgba(255, 143, 163, 0.14) 0 25%, transparent 25% 100%),
+        linear-gradient(225deg, rgba(143, 211, 189, 0.18) 0 22%, transparent 22% 100%),
+        linear-gradient(180deg, #fffaf7 0%, #f5fbf7 100%);
+    }
+
+    main {
+      width: min(920px, calc(100% - 32px));
+      min-height: 100vh;
+      margin: 0 auto;
+      display: grid;
+      place-items: center;
+      padding: 28px 0;
+    }
+
+    .shell {
+      width: 100%;
+      display: grid;
+      gap: 18px;
+    }
+
+    .hero {
+      padding: 28px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.78);
+      box-shadow: 0 18px 48px rgba(70, 47, 39, 0.10);
+    }
+
+    .label {
+      margin: 0 0 8px;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 700;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(34px, 8vw, 72px);
+      line-height: 1.05;
+      letter-spacing: 0;
+    }
+
+    .time {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 8px;
+      margin-top: 18px;
+      font-weight: 800;
+      color: #dd5f78;
+    }
+
+    .time strong {
+      font-size: clamp(48px, 16vw, 128px);
+      line-height: 0.95;
+      letter-spacing: 0;
+    }
+
+    .time span {
+      font-size: clamp(22px, 5vw, 44px);
+    }
+
+    .meter {
+      height: 18px;
+      margin-top: 20px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: #f0e5df;
+      border: 1px solid var(--line);
+    }
+
+    .meter > div {
+      width: ${percent}%;
+      height: 100%;
+      background: linear-gradient(90deg, var(--rose), var(--lemon), var(--mint));
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .stat {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.74);
+    }
+
+    .stat p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .stat strong {
+      display: block;
+      margin-top: 6px;
+      font-size: 24px;
+    }
+
+    @media (max-width: 560px) {
+      main { width: min(100% - 20px, 920px); }
+      .hero { padding: 22px; }
+      .stats { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="shell" aria-label="かまっちょ時間">
+      <div class="hero">
+        <p class="label">かまっちょ時間</p>
+        <h1>残り時間</h1>
+        <div class="time">
+          <strong>${remaining}</strong>
+          <span>分</span>
+        </div>
+        <div class="meter" aria-label="残り時間の割合">
+          <div></div>
+        </div>
+      </div>
+      <div class="stats">
+        <div class="stat">
+          <p>残り</p>
+          <strong>${formatMinutes(remaining)}</strong>
+        </div>
+        <div class="stat">
+          <p>総追加</p>
+          <strong>${formatMinutes(total)}</strong>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>`,
+    {
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+      },
+    }
+  );
 }
 
 function json(data, status = 200) {
