@@ -136,6 +136,10 @@ async function processCommand(env, role, lineUserId, text) {
     return processPartnerCommand(env, lineUserId, normalized, text);
   }
 
+  if (normalized === "かまちょ" || (await getUserState(env.DB, lineUserId))) {
+    return processPartnerCommand(env, lineUserId, normalized, text);
+  }
+
   return processOwnerCommand(env, lineUserId, normalized, text);
 }
 
@@ -155,6 +159,13 @@ async function processPartnerCommand(env, lineUserId, normalized, rawText) {
     : null;
 
   if (minutes === null) {
+    if (state === "awaiting_use_minutes") {
+      return {
+        message: "分数の数字だけ送ってね。\n例: 30",
+        quickReply: null,
+      };
+    }
+
     return {
       message:
         "使える操作は「残り」と「かまちょ」です。\n" +
@@ -166,6 +177,13 @@ async function processPartnerCommand(env, lineUserId, normalized, rawText) {
   if (minutes <= 0) {
     return {
       message: "使用する時間は1分以上で入力してください。",
+      quickReply: null,
+    };
+  }
+
+  if (minutes > 30) {
+    return {
+      message: "一度に使用できる時間は30分までです。",
       quickReply: null,
     };
   }
@@ -188,7 +206,7 @@ async function processPartnerCommand(env, lineUserId, normalized, rawText) {
 
   await clearUserState(env.DB, lineUserId);
 
-  if (env.OWNER_LINE_USER_ID) {
+  if (env.OWNER_LINE_USER_ID && lineUserId !== env.OWNER_LINE_USER_ID) {
     await pushMessage(
       env.LINE_CHANNEL_ACCESS_TOKEN,
       env.OWNER_LINE_USER_ID,
