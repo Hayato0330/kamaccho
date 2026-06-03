@@ -136,7 +136,9 @@ async function processCommand(env, role, lineUserId, text) {
     return processPartnerCommand(env, lineUserId, normalized, text);
   }
 
-  if (normalized === "かまちょ" || (await getUserState(env.DB, lineUserId))) {
+  const state = await getUserState(env.DB, lineUserId);
+
+  if (normalized === "かまちょ" || state === "awaiting_use_minutes") {
     return processPartnerCommand(env, lineUserId, normalized, text);
   }
 
