@@ -140,13 +140,25 @@ async function processCommand(env, role, lineUserId, text) {
 }
 
 async function processPartnerCommand(env, lineUserId, normalized, rawText) {
-  const minutes = parseUseMinutes(normalized);
+  if (normalized === "かまちょ") {
+    await setUserState(env.DB, lineUserId, "awaiting_use_minutes");
 
-  if (!minutes) {
+    return {
+      message: "どれくらいかまってほしい？\n(分数の数字のみを送ってね)",
+      quickReply: null,
+    };
+  }
+
+  const state = await getUserState(env.DB, lineUserId);
+  const minutes = state === "awaiting_use_minutes"
+    ? parseMinutesOnly(normalized)
+    : null;
+
+  if (minutes === null) {
     return {
       message:
-        "使える操作は「残り」と「使用」です。\n" +
-        "例: 使用 30 / 30分",
+        "使える操作は「残り」と「かまちょ」です。\n" +
+        "時間を使いたいときは「かまちょ」と送ってね。",
       quickReply: getQuickReply("partner"),
     };
   }
@@ -154,7 +166,7 @@ async function processPartnerCommand(env, lineUserId, normalized, rawText) {
   if (minutes <= 0) {
     return {
       message: "使用する時間は1分以上で入力してください。",
-      quickReply: getQuickReply("partner"),
+      quickReply: null,
     };
   }
 
@@ -173,6 +185,8 @@ async function processPartnerCommand(env, lineUserId, normalized, rawText) {
       quickReply: getQuickReply("partner"),
     };
   }
+
+  await clearUserState(env.DB, lineUserId);
 
   if (env.OWNER_LINE_USER_ID) {
     await pushMessage(
@@ -276,6 +290,11 @@ function parseUseMinutes(text) {
   if (useMatch) return Number(useMatch[1]);
 
   return null;
+}
+
+function parseMinutesOnly(text) {
+  const match = text.match(/^(\d+)$/);
+  return match ? Number(match[1]) : null;
 }
 
 async function updateWallet(db, params) {
@@ -409,6 +428,70 @@ async function upsertUser(db, lineUserId, role) {
     .run();
 }
 
+async function getUserState(db, lineUserId) {
+  await ensureUserStatesTable(db);
+
+  const row = await db
+    .prepare(
+      `
+      SELECT state
+      FROM user_states
+      WHERE line_user_id = ?
+      `
+    )
+    .bind(lineUserId)
+    .first();
+
+  return row?.state || null;
+}
+
+async function setUserState(db, lineUserId, state) {
+  await ensureUserStatesTable(db);
+
+  await db
+    .prepare(
+      `
+      INSERT INTO user_states (
+        line_user_id,
+        state
+      ) VALUES (?, ?)
+      ON CONFLICT(line_user_id) DO UPDATE SET
+        state = excluded.state,
+        updated_at = CURRENT_TIMESTAMP
+      `
+    )
+    .bind(lineUserId, state)
+    .run();
+}
+
+async function clearUserState(db, lineUserId) {
+  await ensureUserStatesTable(db);
+
+  await db
+    .prepare(
+      `
+      DELETE FROM user_states
+      WHERE line_user_id = ?
+      `
+    )
+    .bind(lineUserId)
+    .run();
+}
+
+async function ensureUserStatesTable(db) {
+  await db
+    .prepare(
+      `
+      CREATE TABLE IF NOT EXISTS user_states (
+        line_user_id TEXT PRIMARY KEY,
+        state TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+      `
+    )
+    .run();
+}
+
 async function getWallet(db) {
   const wallet = await db
     .prepare(
@@ -449,9 +532,7 @@ function getQuickReply(role) {
     return {
       items: [
         quickReplyText("残りを見る", "残り"),
-        quickReplyText("15分使う", "使用 15"),
-        quickReplyText("30分使う", "使用 30"),
-        quickReplyText("60分使う", "使用 60"),
+        quickReplyText("かまちょ", "かまちょ"),
       ],
     };
   }
