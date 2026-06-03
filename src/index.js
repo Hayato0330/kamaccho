@@ -226,8 +226,51 @@ async function processPartnerCommand(env, lineUserId, normalized, rawText) {
 
 async function processOwnerCommand(env, lineUserId, normalized, rawText) {
   const setMatch = normalized.match(/^設定\s+(\d+)$/);
-  const addMatch = normalized.match(/^追加\s+(\d+)$/);
   const adjustMatch = normalized.match(/^調整\s+(-?\d+)$/);
+  const state = await getUserState(env.DB, lineUserId);
+
+  if (normalized === "追加") {
+    await setUserState(env.DB, lineUserId, "awaiting_add_minutes");
+
+    return {
+      message: "何分追加する？\n(分数の数字のみを送ってね)",
+      quickReply: null,
+    };
+  }
+
+  if (state === "awaiting_add_minutes") {
+    const minutes = parseMinutesOnly(normalized);
+
+    if (minutes === null) {
+      return {
+        message: "分数の数字だけ送ってください。\n例: 60",
+        quickReply: null,
+      };
+    }
+
+    if (minutes <= 0) {
+      return {
+        message: "追加する時間は1分以上で入力してください。",
+        quickReply: null,
+      };
+    }
+
+    const result = await updateWallet(env.DB, {
+      actorLineUserId: lineUserId,
+      eventType: "add",
+      minutes,
+      rawMessage: rawText,
+    });
+
+    await clearUserState(env.DB, lineUserId);
+
+    return {
+      message:
+        `${minutes}分を追加しました。\n` +
+        `残り時間は ${formatMinutes(result.afterRemaining)} です。`,
+      quickReply: getQuickReply("owner"),
+    };
+  }
 
   if (setMatch) {
     const minutes = Number(setMatch[1]);
@@ -237,23 +280,6 @@ async function processOwnerCommand(env, lineUserId, normalized, rawText) {
       message:
         `残り時間を ${formatMinutes(result.afterRemaining)} に設定しました。\n` +
         `総追加時間は ${formatMinutes(result.totalMinutes)} です。`,
-      quickReply: getQuickReply("owner"),
-    };
-  }
-
-  if (addMatch) {
-    const minutes = Number(addMatch[1]);
-    const result = await updateWallet(env.DB, {
-      actorLineUserId: lineUserId,
-      eventType: "add",
-      minutes,
-      rawMessage: rawText,
-    });
-
-    return {
-      message:
-        `${minutes}分を追加しました。\n` +
-        `残り時間は ${formatMinutes(result.afterRemaining)} です。`,
       quickReply: getQuickReply("owner"),
     };
   }
@@ -287,7 +313,7 @@ async function processOwnerCommand(env, lineUserId, normalized, rawText) {
   return {
     message:
       "使える操作は「残り」「追加」「調整」「設定」です。\n" +
-      "例: 追加 60 / 調整 -10 / 設定 180",
+      "例: 追加 / 調整 -10 / 設定 180",
     quickReply: getQuickReply("owner"),
   };
 }
@@ -558,8 +584,7 @@ function getQuickReply(role) {
   return {
     items: [
       quickReplyText("残りを見る", "残り"),
-      quickReplyText("30分追加", "追加 30"),
-      quickReplyText("60分追加", "追加 60"),
+      quickReplyText("追加", "追加"),
       quickReplyText("30分減らす", "調整 -30"),
     ],
   };
