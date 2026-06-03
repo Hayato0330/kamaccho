@@ -6,6 +6,17 @@ export default {
       return renderHomePage(env);
     }
 
+    if (request.method === "GET" && url.pathname === "/manifest.webmanifest") {
+      return renderManifest();
+    }
+
+    if (
+      request.method === "GET" &&
+      (url.pathname === "/icon.svg" || url.pathname === "/apple-touch-icon.svg")
+    ) {
+      return renderIcon();
+    }
+
     if (request.method === "GET" && url.pathname === "/api/status") {
       const wallet = await getWallet(env.DB);
       return json({
@@ -733,6 +744,13 @@ async function renderHomePage(env) {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>かまっちょ時間</title>
+  <meta name="theme-color" content="#fffaf7">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="かまっちょ">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.svg">
   <style>
     :root {
       color-scheme: light;
@@ -905,4 +923,43 @@ function json(data, status = 200) {
       "Content-Type": "application/json; charset=utf-8",
     },
   });
+}
+
+function renderManifest() {
+  return json({
+    name: "かまっちょ時間",
+    short_name: "かまっちょ",
+    start_url: "/",
+    scope: "/",
+    display: "standalone",
+    background_color: "#fffaf7",
+    theme_color: "#fffaf7",
+    icons: [
+      {
+        src: "/icon.svg",
+        sizes: "any",
+        type: "image/svg+xml",
+        purpose: "any maskable",
+      },
+    ],
+  });
+}
+
+function renderIcon() {
+  return new Response(
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="108" fill="#fffaf7"/>
+  <path d="M80 170c0-55 45-100 100-100 33 0 63 16 82 41 19-25 49-41 82-41 55 0 100 45 100 100 0 116-164 218-182 229-18-11-182-113-182-229z" fill="#ff8fa3"/>
+  <path d="M98 335c61 55 139 102 164 117 25-15 103-62 164-117" fill="none" stroke="#8fd3bd" stroke-width="30" stroke-linecap="round"/>
+  <circle cx="178" cy="178" r="26" fill="#ffd166"/>
+  <circle cx="334" cy="178" r="26" fill="#ffd166"/>
+  <text x="256" y="306" text-anchor="middle" font-family="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="150" font-weight="800" fill="#fffaf7">か</text>
+</svg>`,
+    {
+      headers: {
+        "Content-Type": "image/svg+xml; charset=utf-8",
+        "Cache-Control": "public, max-age=86400",
+      },
+    }
+  );
 }
